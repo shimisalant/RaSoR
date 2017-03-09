@@ -1,0 +1,14 @@
+*.pyc
+*.swp
+*.pkl
+*.bin
+*.hdf5
+*.npy
+_*.png
+*.tmp
+*.csv
+*.class
+tags
+data/*
+!data/train-v1.1.json
+!data/dev-v1.1.json
