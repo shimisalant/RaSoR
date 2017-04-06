@@ -1,21 +1,20 @@
-
 import numpy as np
 from collections import namedtuple
 
 
 EpochResult = namedtuple('EpochResult', [
   'trn_loss', 'trn_acc',
-  'dev_min_loss', 'dev_prx_loss', 'dev_max_acc', 'dev_prx_acc', 'dev_em', 'dev_f1'])
+  'dev_loss', 'dev_acc', 'dev_em', 'dev_f1'])
 
 
 def _format_epoch_result(epoch_title, epoch_idx, er):
   return ('{:<10s} {:<6s} :   '
     'trn: loss={:<5.3f} acc={:<6.3f}   '
-    'dev: min_loss={:<5.3f} prx_loss={:<5.3f} max_acc={:<6.3f} prx_acc={:<6.3f}   '
+    'dev: loss={:<5.3f} acc={:<6.3f}   '
     'em={:<6.3f} f1={:<6.3f}').format(
       epoch_title, '(e'+str(epoch_idx+1)+')',
       er.trn_loss, 100*er.trn_acc,
-      er.dev_min_loss, er.dev_prx_loss, 100*er.dev_max_acc, 100*er.dev_prx_acc,
+      er.dev_loss, 100*er.dev_acc,
       100*er.dev_em, 100*er.dev_f1)
 
 
@@ -42,10 +41,8 @@ def plot_epoch_results(epoch_results, filename):
 
   trn_losses = [er.trn_loss for er in epoch_results]
   trn_accs = [er.trn_acc for er in epoch_results]
-  dev_min_losses = [er.dev_min_loss for er in epoch_results]
-  dev_prx_losses = [er.dev_prx_loss for er in epoch_results]
-  dev_max_accs = [er.dev_max_acc for er in epoch_results]
-  dev_prx_accs = [er.dev_prx_acc for er in epoch_results]
+  dev_losses = [er.dev_loss for er in epoch_results]
+  dev_accs = [er.dev_acc for er in epoch_results]
   dev_ems = [er.dev_em for er in epoch_results]
   dev_f1s = [er.dev_f1 for er in epoch_results]
   epoch_nums = range(1, len(epoch_results)+1)
@@ -54,13 +51,11 @@ def plot_epoch_results(epoch_results, filename):
   axarr[1].set_xlabel('epoch')
 
   _plot_series(axarr[0], epoch_nums, trn_losses, 'blue', 'train loss', True)
-  _plot_series(axarr[0], epoch_nums, dev_min_losses, 'red', 'dev min loss', True)
-  _plot_series(axarr[0], epoch_nums, dev_prx_losses, 'orange', 'dev prx loss', True)
+  _plot_series(axarr[0], epoch_nums, dev_losses, 'red', 'dev loss', True)
   axarr[0].legend(loc='upper right', prop={'size':12})
 
   _plot_series(axarr[1], epoch_nums, trn_accs, 'blue', 'train acc', False)
-  _plot_series(axarr[1], epoch_nums, dev_max_accs, 'red', 'dev max acc', False)
-  _plot_series(axarr[1], epoch_nums, dev_prx_accs, 'orange', 'dev prx acc', False)
+  _plot_series(axarr[1], epoch_nums, dev_accs, 'red', 'dev acc', False)
   _plot_series(axarr[1], epoch_nums, dev_ems, 'pink', 'dev em', False)
   _plot_series(axarr[1], epoch_nums, dev_f1s, 'cyan', 'dev f1', False)
   axarr[1].legend(loc='lower right', prop={'size':12})

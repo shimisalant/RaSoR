@@ -1,4 +1,3 @@
-
 import sys
 import logging
 import time
@@ -12,23 +11,21 @@ from reader import get_data, construct_answer_hat, write_test_predictions
 from evaluate11 import metric_max_over_ground_truths, exact_match_score, f1_score
 
 
-
 class Config(object):
   def __init__(self, compared=[], **kwargs):
     self.name = None
     self.desc = None
     self.device = None                      # 'cpu' / 'gpu<index>'
-    self.is_train = True                    # if True then this configuration will be trained;
-                                            # otherwise test predictions will be produced
     self.plot = False                       # whether to plot training graphs
+    self.save_freq = None                   # how often to save model (in epochs); None for only after best EM/F1 epochs
 
     self.word_emb_data_path_prefix = None   # path of preprocessed word embedding data, produced by setup.py
     self.tokenized_trn_json_path = None     # path of tokenized training set JSON, produced by setup.py
     self.tokenized_dev_json_path = None     # path of tokenized dev set JSON, produced by setup.py
+    self.test_json_path = None              # path of test set JSON
+    self.pred_json_path = None              # path of test predictions JSON
     self.tst_load_model_path = None         # path of trained model data, used for producing test set predictions
-    self.tst_json_path = None               # path of test set JSON
-    self.tst_prd_json_path = None           # path of test predictions JSON
-    self.tst_split = False                  # whether to split hyphenated unknown words of test set, see setup.py
+    self.tst_split = True                   # whether to split hyphenated unknown words of test set, see setup.py
 
     self.seed = np.random.random_integers(1e6, 1e9)
     self.max_ans_len = 30                   # maximal answer length, answers of longer length are discarded
@@ -43,10 +40,10 @@ class Config(object):
     self.ff_dims = [100]                    # dimensions of hidden FF layers
     self.ff_drop_x = 0.2                    # dropout rate of FF layers
     self.batch_size = 40
-    self.max_num_epochs = None              # number of epochs to train for
+    self.max_num_epochs = 150               # max number of epochs to train for
 
     self.num_bilstm_layers = 2              # number of BiLSTM layers, where BiLSTM is applied
-    self.hidden_dim = 50                    # dimension of hidden state of each uni-directional LSTM
+    self.hidden_dim = 100                   # dimension of hidden state of each uni-directional LSTM
     self.lstm_drop_h = 0.1                  # dropout rate for recurrent hidden state of LSTM
     self.lstm_drop_x = 0.4                  # dropout rate for inputs of LSTM
     self.lstm_couple_i_and_f = True         # customizable LSTM configuration, see base/model.py
@@ -68,6 +65,14 @@ class Config(object):
     self.adam_beta2 = 0.999
     self.adam_eps = 1e-8
 
+    self.objective = 'span_multinomial'     # 'span_multinomial': multinomial distribution over all spans
+                                            # 'span_binary':      logistic distribution per span
+                                            # 'span_endpoints':   two multinomial distributions, over span start and end
+
+    self.ablation = None                    # 'only_q_align':     question encoded only by passage-aligned representation
+                                            # 'only_q_indep':     question encoded only by passage-independent representation
+                                            # None:               question encoded by both
+
     assert all(k in self.__dict__ for k in kwargs)
     assert all(k in self.__dict__ for k in compared)
     self.__dict__.update(kwargs)
@@ -85,17 +90,17 @@ class Config(object):
 
 def _trn_epoch(config, model, data, epoch, np_rng):
   logger = logging.getLogger()
-  dataset = data.trn
-  num_samples = dataset.vectorized.ctxs.shape[0]
+  # indices of questions which have a valid answer
+  valid_qtn_idxs = np.flatnonzero(data.trn.vectorized.qtn_ans_inds).astype(np.int32)
+  np_rng.shuffle(valid_qtn_idxs)
+  num_samples = valid_qtn_idxs.size
   batch_sizes = []
   losses = []
   accs = []
   samples_per_sec = []
-  sample_idxs_perm = np.arange(num_samples, dtype=np.int32)
-  np_rng.shuffle(sample_idxs_perm)
-  idxs = range(0, num_samples, config.batch_size)
-  for b, s in enumerate(idxs, 1):
-    batch_idxs = sample_idxs_perm[s:min(s+config.batch_size, num_samples)]
+  ss = range(0, num_samples, config.batch_size)
+  for b, s in enumerate(ss, 1):
+    batch_idxs = valid_qtn_idxs[s:min(s+config.batch_size, num_samples)]
     batch_sizes.append(len(batch_idxs))
 
     start_time = time.time()
@@ -104,10 +109,10 @@ def _trn_epoch(config, model, data, epoch, np_rng):
 
     losses.append(loss)
     accs.append(acc)
-    if b % 100 == 0 or b == len(idxs):
+    if b % 100 == 0 or b == len(ss):
       logger.info(
         '{:<8s} {:<15s} lr={:<8.7f} : train loss={:<8.5f}\tacc={:<8.5f}\tgrad={:<8.5f}\tsamples/sec={:<.1f}'.format(
-        config.device, 'e'+str(epoch)+'b'+str(b)+'\\'+str(len(idxs)), float(model.get_lr_value()),
+        config.device, 'e'+str(epoch)+'b'+str(b)+'\\'+str(len(ss)), float(model.get_lr_value()),
         float(loss), float(acc), float(global_grad_norm), float(samples_per_sec[b-1])))
   trn_loss = np.average(losses, weights=batch_sizes)
   trn_acc = np.average(accs, weights=batch_sizes)
@@ -117,100 +122,143 @@ def _trn_epoch(config, model, data, epoch, np_rng):
 
 def _dev_epoch(config, model, data):
   logger = logging.getLogger()
-  dataset = data.dev
-  num_samples = dataset.vectorized.ctxs.shape[0]
+  num_all_samples = data.dev.vectorized.qtn_ans_inds.size
+  ans_hat_starts = np.zeros(num_all_samples, dtype=np.int32)
+  ans_hat_ends = np.zeros(num_all_samples, dtype=np.int32)
+
+  # indices of questions which have a valid answer
+  valid_qtn_idxs = np.flatnonzero(data.dev.vectorized.qtn_ans_inds).astype(np.int32)
+  num_valid_samples = valid_qtn_idxs.size
   batch_sizes = []
-  min_losses = []
-  prx_losses = []
-  max_accs = []
-  prx_accs = []
-  ans_hat_starts = np.zeros(num_samples, dtype=np.int32)
-  ans_hat_ends = np.zeros(num_samples, dtype=np.int32)
-  idxs = range(0, num_samples, config.batch_size)
-  for b, s in enumerate(idxs, 1):
-    e = min(s + config.batch_size, num_samples)
-    batch_idxs = np.arange(s, e, dtype=np.int32)
+  losses = []
+  accs = []
+  ss = range(0, num_valid_samples, config.batch_size)
+  for b, s in enumerate(ss, 1):
+    batch_idxs = valid_qtn_idxs[s:min(s+config.batch_size, num_valid_samples)]
     batch_sizes.append(len(batch_idxs))
 
-    min_loss, prx_loss, max_acc, prx_acc, ans_hat_start_word_idxs, ans_hat_end_word_idxs = model.eval_dev(batch_idxs)
+    loss, acc, ans_hat_start_word_idxs, ans_hat_end_word_idxs = model.eval_dev(batch_idxs)
 
-    min_losses.append(min_loss)
-    prx_losses.append(min_loss)
-    max_accs.append(max_acc)
-    prx_accs.append(prx_acc)
-    ans_hat_starts[s:e] = ans_hat_start_word_idxs
-    ans_hat_ends[s:e] = ans_hat_end_word_idxs
-    if b % 100 == 0 or b == len(idxs):
-      logger.info('{:<8s} {:<15s} : dev'.format(config.device, 'b'+str(b)+'\\'+str(len(idxs))))
-  min_loss = np.average(min_losses, weights=batch_sizes)
-  prx_loss = np.average(prx_losses, weights=batch_sizes)
-  max_acc = np.average(max_accs, weights=batch_sizes)
-  prx_acc = np.average(prx_accs, weights=batch_sizes)
+    losses.append(loss)
+    accs.append(acc)
+    ans_hat_starts[batch_idxs] = ans_hat_start_word_idxs
+    ans_hat_ends[batch_idxs] = ans_hat_end_word_idxs
+    if b % 100 == 0 or b == len(ss):
+      logger.info('{:<8s} {:<15s} : dev valid'.format(config.device, 'b'+str(b)+'\\'+str(len(ss))))
+  dev_loss = np.average(losses, weights=batch_sizes)
+  dev_acc = np.average(accs, weights=batch_sizes)
 
+  # indices of questions which have an invalid answer
+  invalid_qtn_idxs = np.setdiff1d(np.arange(num_all_samples), valid_qtn_idxs).astype(np.int32)
+  num_invalid_samples = invalid_qtn_idxs.size
+  ss = range(0, num_invalid_samples, config.batch_size)
+  for b, s in enumerate(ss, 1):
+    batch_idxs = invalid_qtn_idxs[s:min(s+config.batch_size, num_invalid_samples)]
+
+    _, _, ans_hat_start_word_idxs, ans_hat_end_word_idxs = model.eval_dev(batch_idxs)
+
+    ans_hat_starts[batch_idxs] = ans_hat_start_word_idxs
+    ans_hat_ends[batch_idxs] = ans_hat_end_word_idxs
+    if b % 100 == 0 or b == len(ss):
+      logger.info('{:<8s} {:<15s} : dev invalid'.format(config.device, 'b'+str(b)+'\\'+str(len(ss))))
+
+  # calculate EM, F1
   ems = []
   f1s = []
   for qtn_idx, (ans_hat_start_word_idx, ans_hat_end_word_idx) in enumerate(zip(ans_hat_starts, ans_hat_ends)):
-    qtn = dataset.tabular.qtns[qtn_idx]
-    ctx = dataset.tabular.ctxs[qtn.ctx_id]
+    qtn = data.dev.tabular.qtns[qtn_idx]
+    ctx = data.dev.tabular.ctxs[qtn.ctx_idx]
     ans_hat_str = construct_answer_hat(ctx, ans_hat_start_word_idx, ans_hat_end_word_idx)
     ans_strs = qtn.ans_texts
     ems.append(metric_max_over_ground_truths(exact_match_score, ans_hat_str, ans_strs))
     f1s.append(metric_max_over_ground_truths(f1_score, ans_hat_str, ans_strs))
-  assert len(ems) == len(f1s) == num_samples
-  em = np.mean(ems)
-  f1 = np.mean(f1s)
-  return min_loss, prx_loss, max_acc, prx_acc, em, f1
+  dev_em = np.mean(ems)
+  dev_f1 = np.mean(f1s)
+  return dev_loss, dev_acc, dev_em, dev_f1
 
 
 def _tst_epoch(config, model, data):
   logger = logging.getLogger()
-  dataset = data.tst
-  num_samples = dataset.vectorized.ctxs.shape[0]
+  num_samples = data.tst.vectorized.qtns.shape[0]
   ans_hat_starts = np.zeros(num_samples, dtype=np.int32)
   ans_hat_ends = np.zeros(num_samples, dtype=np.int32)
-  idxs = range(0, num_samples, config.batch_size)
-  for b, s in enumerate(idxs, 1):
+  ss = range(0, num_samples, config.batch_size)
+  for b, s in enumerate(ss, 1):
     e = min(s + config.batch_size, num_samples)
     batch_idxs = np.arange(s, e, dtype=np.int32)
 
     ans_hat_start_word_idxs, ans_hat_end_word_idxs = model.eval_tst(batch_idxs)
 
-    ans_hat_starts[s:e] = ans_hat_start_word_idxs
-    ans_hat_ends[s:e] = ans_hat_end_word_idxs
-    if b % 100 == 0 or b == len(idxs):
-      logger.info('{:<8s} {:<15s} : test'.format(config.device, 'b'+str(b)+'\\'+str(len(idxs))))
+    ans_hat_starts[batch_idxs] = ans_hat_start_word_idxs
+    ans_hat_ends[batch_idxs] = ans_hat_end_word_idxs
+    if b % 100 == 0 or b == len(ss):
+      logger.info('{:<8s} {:<15s} : test'.format(config.device, 'b'+str(b)+'\\'+str(len(ss))))
   ans_hats = {}
   for qtn_idx, (ans_hat_start_word_idx, ans_hat_end_word_idx) in enumerate(zip(ans_hat_starts, ans_hat_ends)):
-    qtn = dataset.tabular.qtns[qtn_idx]
-    ctx = dataset.tabular.ctxs[qtn.ctx_id]
+    qtn = data.tst.tabular.qtns[qtn_idx]
+    ctx = data.tst.tabular.ctxs[qtn.ctx_idx]
     ans_hat_str = construct_answer_hat(ctx, ans_hat_start_word_idx, ans_hat_end_word_idx)
     ans_hats[qtn.qtn_id] = ans_hat_str
   return ans_hats
 
 
 def _get_configs():
-  compared = ['device', 'ff_dims', 'ff_drop_x', 'batch_size', 'hidden_dim', 'lstm_drop_h', 'lstm_drop_x', 'tst_split']
-  configs = []
-  configs.append(Config(compared,
-    name = 'RaSoR',
-    desc = 'Recurrent span representations',
-    word_emb_data_path_prefix = 'data/preprocessed_glove_with_unks',
-    tokenized_trn_json_path = 'data/train-v1.1.tokenized.json',
-    tokenized_dev_json_path = 'data/dev-v1.1.tokenized.json',
-    tst_load_model_path = 'models/RaSoR_cfg0_best_em.pkl',
-    tst_split = False,
-    max_num_epochs = 100
-  ))
+  compared = [
+    'device', 'objective', 'ablation', 'batch_size', 'ff_dims', 'ff_drop_x',
+    'hidden_dim', 'lstm_drop_h', 'lstm_drop_x', 'lstm_drop_h', 'q_aln_ff_tie']
+  common = {
+    'name': 'RaSoR',
+    'desc': 'Recurrent span representations',
+    'word_emb_data_path_prefix': 'data/preprocessed_glove_with_unks.split',
+    'tokenized_trn_json_path': 'data/train-v1.1.tokenized.split.json',
+    'tokenized_dev_json_path': 'data/dev-v1.1.tokenized.split.json',
+    'plot': True
+  }
+  configs = [
+
+    # Objective comparison:
+
+    Config(compared,
+      objective = 'span_multinomial',
+      tst_load_model_path = 'models/RaSoR_cfg0_best_em.pkl',
+      **common),
+
+    Config(compared,
+      objective = 'span_binary',
+      tst_load_model_path = 'models/RaSoR_cfg1_best_em.pkl',
+      **common),
+
+    Config(compared,
+      objective = 'span_endpoints',
+      tst_load_model_path = 'models/RaSoR_cfg2_best_em.pkl',
+      **common),
+      
+    # Ablation study:
+
+    Config(compared,
+      objective = 'span_multinomial',
+      ablation = 'only_q_align',
+      tst_load_model_path = 'models/RaSoR_cfg3_best_em.pkl',
+      **common),
+
+    Config(compared,
+      objective = 'span_multinomial',
+      ablation = 'only_q_indep',
+      tst_load_model_path = 'models/RaSoR_cfg4_best_em.pkl',
+      **common),
+
+    ]
+
   return configs
 
   
-def _main(config, config_idx):
+def _main(config, config_idx, train):
   base_filename = config.name + '_cfg' + str(config_idx)
   logger = set_up_logger('logs/' + base_filename + '.log')
   title = '{}: {} ({}) config index {}'.format(__file__, config.name, config.desc, config_idx)
   logger.info('START ' + title + '\n\n{}\n'.format(config))
 
-  data = get_data(config)
+  data = get_data(config, train)
 
   if config.device != 'cpu':
     assert 'theano' not in sys.modules 
@@ -219,11 +267,12 @@ def _main(config, config_idx):
   from model import get_model
   model = get_model(config, data)
 
-  if not config.is_train:
-    if config.tst_load_model_path and not model.load_if_exists(config.tst_load_model_path):
+  if not train:
+    assert config.tst_load_model_path
+    if not model.load(config.tst_load_model_path):
       raise AssertionError('Failed loading model weights from {}'.format(config.tst_load_model_path))
     ans_hats = _tst_epoch(config, model, data)
-    write_test_predictions(ans_hats, config.tst_prd_json_path)
+    write_test_predictions(ans_hats, config.pred_json_path)
     logger.info('END ' + title)
     return
 
@@ -234,17 +283,17 @@ def _main(config, config_idx):
   np_rng = np.random.RandomState(config.seed // 2)
   for epoch in range(1, config.max_num_epochs+1):
     trn_loss, trn_acc, trn_samples_per_sec = _trn_epoch(config, model, data, epoch, np_rng)
-    dev_min_loss, dev_prx_loss, dev_max_acc, dev_prx_acc, dev_em, dev_f1 = _dev_epoch(config, model, data)
+    dev_loss, dev_acc, dev_em, dev_f1 = _dev_epoch(config, model, data)
     if dev_em > max_em:
       model.save('models/' + base_filename + '_best_em.pkl')
       max_em = dev_em
     if dev_f1 > max_f1:
       model.save('models/' + base_filename + '_best_f1.pkl')
       max_f1 = dev_f1
-    if epoch % 5 == 0:
+    if config.save_freq and epoch % config.save_freq == 0:
       model.save('models/' + base_filename + '_e{:03d}.pkl'.format(epoch))
     epoch_results.append(
-      EpochResult(trn_loss, trn_acc, dev_min_loss, dev_prx_loss, dev_max_acc, dev_prx_acc, dev_em, dev_f1))
+      EpochResult(trn_loss, trn_acc, dev_loss, dev_acc, dev_em, dev_f1))
     if config.plot:
       plot_epoch_results(epoch_results, 'logs/' + base_filename + '.png')
     logger.info('\n\nFinished epoch {} for: (config index {}) (samples/sec: {:<.1f})\n{}\n\nResults:\n{}\n\n'.format(
@@ -257,15 +306,14 @@ if __name__ == '__main__':
   parser.add_argument('--device', help='device e.g. cpu, gpu0, gpu1, ...', default='cpu')
   parser.add_argument('--train', help='whether to train', action='store_true')
   parser.add_argument('--cfg_idx', help='configuration index', type=int, default=0)
-  parser.add_argument('tst_json_path', nargs='?', help='test JSON file for which answers should be predicted')
-  parser.add_argument('tst_prd_json_path', nargs='?', help='where to write test predictions to')
+  parser.add_argument('test_json_path', nargs='?', help='test JSON file for which answers should be predicted')
+  parser.add_argument('pred_json_path', nargs='?', help='where to write test predictions to')
   args = parser.parse_args()
-  if bool(args.tst_json_path) != bool(args.tst_prd_json_path) or bool(args.tst_json_path) == args.train:
-    parser.error('Specify both tst_json_path and tst_prd_json_path, or only --train')
+  if bool(args.test_json_path) != bool(args.pred_json_path) or bool(args.test_json_path) == args.train:
+    parser.error('Specify both test_json_path and pred_json_path, or only --train')
   config = _get_configs()[args.cfg_idx]
   config.device = args.device
-  config.is_train = args.train
-  config.tst_json_path = args.tst_json_path
-  config.tst_prd_json_path = args.tst_prd_json_path
-  _main(config, args.cfg_idx)
+  config.test_json_path = args.test_json_path
+  config.pred_json_path = args.pred_json_path
+  _main(config, args.cfg_idx, args.train)
 

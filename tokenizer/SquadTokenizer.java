@@ -57,26 +57,27 @@ public class SquadTokenizer {
     Set<String> allTokens = new HashSet<String>();
     Set<String> unknownTokens = new HashSet<String>();
     int numArticles = 0;
-    int numDiscardedArticles = 0;
+    int numInvalidArticles = 0;
     int numParagraphs = 0;
-    int numDiscardedParagraphs = 0;
+    int numInvalidParagraphs = 0;
     int numQuestions = 0;
     int numFullQuestions = 0;
     int numPartialQuestions = 0;
-    int numDiscardedQuestions = 0;
+    int numInvalidQuestions = 0;
     int numAnswers = 0;
-    int numDiscardedAnswers = 0;
+    int numInvalidAnswers = 0;
     int numSplits = 0;
     @Override
     public String toString() {
-      return "num allTokens: " + allTokens.size() +
-        "\nnum unknownTokens: " + unknownTokens.size() +
-        "\nnumArticles: " + numArticles + " (discarded: " + numDiscardedArticles + ")" +
-        "\nnumParagraphs: " + numParagraphs + " (discarded: " + numDiscardedParagraphs + ")" +
-        "\nnumQuestions: " + numQuestions + " (discarded: " + numDiscardedQuestions +
-        ", partial: " + numPartialQuestions + ", full: " + numFullQuestions + ")" +
-        "\nnumAnswers: " + numAnswers + " (discarded: " + numDiscardedAnswers + ")" +
-        "\nnumSplits: " + numSplits;
+      return "word-types: " + allTokens.size() +
+        "\nunknown word-types: " + unknownTokens.size() +
+        "\n\t(invalidity is due to failure to match answer string to word tokens):" +
+        "\narticles: " + numArticles + " (invalid: " + numInvalidArticles + ")" +
+        "\nparagraphs: " + numParagraphs + " (invalid: " + numInvalidParagraphs + ")" +
+        "\nquestions: " + numQuestions + " (invalid: " + numInvalidQuestions +
+        ", some answers: " + numPartialQuestions + ", all answers: " + numFullQuestions + ")" +
+        "\nanswers: " + numAnswers + " (invalid: " + numInvalidAnswers + ")" +
+        "\nnum of performed splits: " + numSplits;
     }
   }
 
@@ -147,108 +148,112 @@ public class SquadTokenizer {
     Set<String> unknownWords = new HashSet<String>();
     // String version = (String) json.get("version");
     JSONArray articleObjs = (JSONArray) json.get("data");
-    Iterator<Object> articleIt = articleObjs.iterator();
-    if (!articleIt.hasNext()) {
+    if (articleObjs.isEmpty()) {
       throw new RuntimeException("No articles");
     }
-    while (articleIt.hasNext()) {
-      JSONObject articleJson = (JSONObject) articleIt.next();
+
+    int numArticles = articleObjs.size();
+    int numInvalidArticles = 0;
+    for (Object articleObj : articleObjs) {
+      JSONObject articleJson = (JSONObject) articleObj;
       String title = (String) articleJson.get("title");
       JSONArray paragraphObjs = (JSONArray) articleJson.get("paragraphs");
-      Iterator<Object> paragraphIt = paragraphObjs.iterator();
-
-      if (!paragraphIt.hasNext()) {
+      if (paragraphObjs.isEmpty()) {
         throw new RuntimeException("No paragraphs\narticle:\n" + title);
       }
-      while (paragraphIt.hasNext()) {
-        JSONObject paragraphJson = (JSONObject) paragraphIt.next();
+
+      int numParagraphs = paragraphObjs.size();
+      int numInvalidParagraphs = 0;
+      for (Object paragraphObj : paragraphObjs) {
+        JSONObject paragraphJson = (JSONObject) paragraphObj;
 
         String contextStr = (String) paragraphJson.get("context");
         TokenizedText contextTok = tokenize(contextStr, knownWords, unknownWords, split, jsonMetadata, verbose);
         assertReconstruction("context", contextStr, contextTok, -1, -1);
         putTokens(paragraphJson, contextTok);
         jsonMetadata.allTokens.addAll(contextTok.tokens);
-
         JSONArray qaObjs = (JSONArray) paragraphJson.get("qas");
-        Iterator<Object> qaIt = qaObjs.iterator();
-
-        if (!qaIt.hasNext()) {
+        if (qaObjs.isEmpty()) {
           throw new RuntimeException("No questions\narticle:\n" + title + "\ncontext:\n" + contextStr);
         }
-        while (qaIt.hasNext()) {
-          JSONObject qaJson = (JSONObject) qaIt.next();
+
+        int numQuestions = qaObjs.size();
+        int numFullQuestions = 0;
+        int numPartialQuestions = 0;
+        int numInvalidQuestions = 0;
+        for (Object qaObj : qaObjs) {
+          JSONObject qaJson = (JSONObject) qaObj;
           String idStr = (String) qaJson.get("id");
           String questionStr = (String) qaJson.get("question");
           TokenizedText questionTok = tokenize(questionStr, knownWords, unknownWords, split, jsonMetadata, verbose);
           assertReconstruction("question", questionStr, questionTok, -1, -1);
           putTokens(qaJson, questionTok);
           jsonMetadata.allTokens.addAll(questionTok.tokens);
-          jsonMetadata.numQuestions++;
-
-          if (hasAnswers) {
-            JSONArray answerObjs = (JSONArray) qaJson.get("answers");
-            boolean answerRemoved = false;
-            Iterator<Object> answerIt = answerObjs.iterator();
-
-            if (!answerIt.hasNext()) {
-              throw new RuntimeException("No answers\narticle:\n" + title + "\ncontext:\n" + contextStr + "\nid:\n" + idStr);
-            }
-            while (answerIt.hasNext()) {
-              JSONObject answerJson = (JSONObject) answerIt.next();
-
-              String answerStr = (String) answerJson.get("text");
-              int answerStartCharIdx = toIntExact((Long) answerJson.get("answer_start"));
-              int answerAfterEndCharIdx = answerStartCharIdx + answerStr.length();
-
-              int answerStartTokenIdx = contextTok.startCharIdxs.indexOf(answerStartCharIdx);
-              int answerEndTokenIdx = contextTok.afterEndCharIdxs.indexOf(answerAfterEndCharIdx);
-              jsonMetadata.numAnswers++;
-              boolean removeAnswer = false;
-              if (answerStartTokenIdx < 0) {
-                removeAnswer = true;
-                if (verbose) {
-                  print_bad_answer(true, idStr, contextTok, answerStr, answerStartCharIdx, answerAfterEndCharIdx);
-                }
-              }
-              if (answerEndTokenIdx < 0) {
-                removeAnswer = true;
-                if (verbose) {
-                  print_bad_answer(false, idStr, contextTok, answerStr, answerStartCharIdx, answerAfterEndCharIdx);
-                }
-              }
-              if (removeAnswer) {
-                answerIt.remove();
-                answerRemoved = true;
-                jsonMetadata.numDiscardedAnswers++;
-              } else {
-                assertReconstruction("answer", answerStr, contextTok, answerStartTokenIdx, answerEndTokenIdx);
-                answerJson.put("start_token_idx", answerStartTokenIdx);
-                answerJson.put("end_token_idx", answerEndTokenIdx);
-              }
-            }
-            if (!answerRemoved) {
-              jsonMetadata.numFullQuestions++;
-            } else if (!answerObjs.isEmpty()) {
-              jsonMetadata.numPartialQuestions++;
-            } else {
-              qaIt.remove();
-              jsonMetadata.numDiscardedQuestions++;
-            }
+          if (!hasAnswers) {
+            numFullQuestions++;
+            continue;
           }
 
+          JSONArray answerObjs = (JSONArray) qaJson.get("answers");
+          if (answerObjs.isEmpty()) {
+            throw new RuntimeException("No answers\narticle:\n" + title + "\ncontext:\n" + contextStr + "\nid:\n" + idStr);
+          }
+
+          int numAnswers = answerObjs.size();
+          int numInvalidAnswers = 0;
+          for (Object answerObj : answerObjs) {
+            JSONObject answerJson = (JSONObject) answerObj;
+
+            String answerStr = (String) answerJson.get("text");
+            int answerStartCharIdx = toIntExact((Long) answerJson.get("answer_start"));
+            int answerAfterEndCharIdx = answerStartCharIdx + answerStr.length();
+            int answerStartTokenIdx = contextTok.startCharIdxs.indexOf(answerStartCharIdx);
+            int answerEndTokenIdx = contextTok.afterEndCharIdxs.indexOf(answerAfterEndCharIdx);
+            if (verbose) {
+              if (answerStartTokenIdx < 0) {
+                print_bad_answer(true, idStr, contextTok, answerStr, answerStartCharIdx, answerAfterEndCharIdx);
+              }
+              if (answerEndTokenIdx < 0) {
+                print_bad_answer(false, idStr, contextTok, answerStr, answerStartCharIdx, answerAfterEndCharIdx);
+              }
+            }
+            if (answerStartTokenIdx < 0 || answerEndTokenIdx < 0) {
+              answerJson.put("valid", false);
+              numInvalidAnswers++;
+            } else {
+              assertReconstruction("answer", answerStr, contextTok, answerStartTokenIdx, answerEndTokenIdx);
+              answerJson.put("valid", true);
+              answerJson.put("start_token_idx", answerStartTokenIdx);
+              answerJson.put("end_token_idx", answerEndTokenIdx);
+            }
+          }
+          jsonMetadata.numAnswers += numAnswers;
+          jsonMetadata.numInvalidAnswers += numInvalidAnswers;
+
+          if (numInvalidAnswers == 0) {
+            numFullQuestions++;
+          } else if (numInvalidAnswers < numAnswers) {
+            numPartialQuestions++;
+          } else {
+            numInvalidQuestions++;
+          }
         }
-        jsonMetadata.numParagraphs++;
-        if (qaObjs.isEmpty()) {
-          paragraphIt.remove();
-          jsonMetadata.numDiscardedParagraphs++;
+        jsonMetadata.numQuestions += numQuestions;
+        jsonMetadata.numFullQuestions += numFullQuestions;
+        jsonMetadata.numPartialQuestions += numPartialQuestions;
+        jsonMetadata.numInvalidQuestions += numInvalidQuestions;
+        if (numInvalidQuestions == numQuestions) {
+          numInvalidParagraphs++;
         }
       }
-      jsonMetadata.numArticles++;
-      if (paragraphObjs.isEmpty()) {
-        articleIt.remove();
-        jsonMetadata.numDiscardedArticles++;
+      jsonMetadata.numParagraphs += numParagraphs;
+      jsonMetadata.numInvalidParagraphs += numInvalidParagraphs;
+      if (numInvalidParagraphs == numParagraphs) {
+        numInvalidArticles++;
       }
     }
+    jsonMetadata.numArticles += numArticles;
+    jsonMetadata.numInvalidArticles += numInvalidArticles;
 
     JSONArray unknownWordsArray = new JSONArray();
     unknownWordsArray.addAll(unknownWords);

@@ -1,4 +1,3 @@
-
 import numpy as np
 import theano
 import theano.tensor as tt
@@ -20,7 +19,7 @@ def get_shared_floatX(value, name):
 
 
 def gpu_int32(name, x_val, return_shared_var=False):
-  # theano trick: stored as float32 on GPU (if we're using a GPU), and casted back to int32
+  # theano trick: stored as float32 on GPU (if we're using a GPU), and cast back to int32
   assert x_val.dtype == np.int32
   shared_var = get_shared_floatX(x_val, name)
   cast_shared_var = tt.cast(shared_var, 'int32')
@@ -61,4 +60,12 @@ def softmax_depths_with_mask(x, mask):
   y = e_x / (sums + (tt.eq(sums,0)))
   y *= mask
   return y
+
+
+def argmax_with_mask(x, mask):
+  assert x.ndim == 2
+  assert mask.ndim == 2
+  x_min = x.min(axis=1, keepdims=True)
+  x = mask * x + (1 - mask) * x_min
+  return x.argmax(axis=1)
 

@@ -1,4 +1,3 @@
-
 import argparse
 import os
 import sys
@@ -13,7 +12,6 @@ import numpy as np
 from collections import Counter, namedtuple
 
 from base.utils import set_up_logger
-
 
 
 #######################################
@@ -54,7 +52,6 @@ def read_word_emb_data(path_prefix):
 
 def _get_word_emb_data_paths(path_prefix):
   return path_prefix + '.metadata.pkl', path_prefix + '.emb.npy'
-
 
 
 #######################################
@@ -126,7 +123,6 @@ def _write_glove_data(glove_txt_path, glove_max_words, glove_emb_dim,
   return glove_word_emb_data
 
 
-
 #######################################
 # Preprocess datasets:
 #######################################
@@ -139,8 +135,8 @@ def _tokenize_json(json_path, tokenized_json_path, has_answers, glove_strs_path,
   _os_exec(cmd)
 
 
-def tokenize_tst_json(tst_json_path, tokenized_tst_json_path, split):
-  _tokenize_json(tst_json_path, tokenized_tst_json_path, False, GLOVE_STRS_PATH, split)
+def tokenize_tst_json(test_json_path, tokenized_test_json_path, split):
+  _tokenize_json(test_json_path, tokenized_test_json_path, False, GLOVE_STRS_PATH, split)
 
 
 def _os_exec(cmd):
@@ -186,12 +182,11 @@ def _get_random_embeddings(num_embeddings, word_emb_data):
   return unknown_word_embs
 
 
-
 #######################################
 # Misc:
 #######################################
 
-def _write_dummy_tst_json(dev_json_path, dummy_tst_json_path):
+def _write_dummy_tst_json(dev_json_path, dummy_test_json_path):
   change_char_ps = [1 - 1e-5, 1e-5]
   with io.open(dev_json_path, 'r', encoding='utf-8') as f:
     j = json.load(f)
@@ -203,10 +198,9 @@ def _write_dummy_tst_json(dev_json_path, dummy_tst_json_path):
           qa['question'] = ''.join(
             [(c if np.random.choice([True, False], p=change_char_ps) else '?') for c in qa['question']])
           del qa['answers']
-  with io.open(dummy_tst_json_path, 'w', encoding='utf-8') as f:
+  with io.open(dummy_test_json_path, 'w', encoding='utf-8') as f:
     f.write(unicode(json.dumps(j, ensure_ascii=False)))
-  logging.getLogger().info('Written dummy test JSON to {}'.format(dummy_tst_json_path))
-
+  logging.getLogger().info('Written dummy test JSON to {}'.format(dummy_test_json_path))
 
 
 #######################################
@@ -264,9 +258,9 @@ if __name__ == '__main__':
   logger = set_up_logger(log_filename=None, datetime=False)
   parser = argparse.ArgumentParser()
   parser.add_argument('--split',
-    help='whether to split unknown hyphenated words which have a known constituent token', action='store_true')
+    help='whether to split unknown hyphenated words which have a known constituent token', action='store_false')
   parser.add_argument('--num_extra_embeddings',
-    help='number of extra random embeddings to produce', action='store_true', default=100000)
+    help='number of extra random embeddings to produce', type=int, default=100000)
   parser.add_argument('--write_dummy_test',
     help='whether to write a dummy test JSON file', action='store_true')
   args = parser.parse_args()

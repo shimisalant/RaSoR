@@ -1,4 +1,3 @@
-
 import numpy as np
 import theano
 import theano.tensor as tt
@@ -52,5 +51,4 @@ class AdamOptimizer(object):
 
   def get_lr_value(self):
     return self._lr.get_value()
-    
 

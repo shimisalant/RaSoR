@@ -18,14 +18,15 @@ This will download GloVe word embeddings and tokenize raw training / development
 ```bash
 $ python rasor.py --device DEVICE --train
 ```
-where `DEVICE` is `cpu`, or an indexed GPU specification e.g. `gpu0`.
+where `DEVICE` is `cpu`, or an indexed GPU specification e.g. `gpu0`.<br />
+When specifying a certain GPU, the [theano device flag](http://deeplearning.net/software/theano/library/config.html#config.device) must be set to `cpu`, i.e. set `device=cpu` in your `.theanorc` file.
 
 #### Making predictions
 
 ```bash
-$ python rasor.py --device DEVICE tst_json_path tst_prd_json_path
+$ python rasor.py --device DEVICE test_json_path pred_json_path
 ```
-where `tst_json_path` is the path of a JSON file containing articles, paragraphs and questions (see [SQuAD website](https://rajpurkar.github.io/SQuAD-explorer/) for specification of JSON structure), and `tst_prd_json_path` is the path to write predictions to.
+where `test_json_path` is the path of a JSON file containing articles, paragraphs and questions (see [SQuAD website](https://rajpurkar.github.io/SQuAD-explorer/) for specification of JSON structure), and `pred_json_path` is the path to write predictions to.
 
 ---
 

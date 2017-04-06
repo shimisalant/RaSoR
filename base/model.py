@@ -1,4 +1,3 @@
-
 import logging
 import os
 import numbers
@@ -102,7 +101,7 @@ class BaseModel(object):
     with open(filename, 'wb') as f:
       cPickle.dump(param_dict, f, protocol=cPickle.HIGHEST_PROTOCOL)
 
-  def load_if_exists(self, filename, allow_mismatch=False):
+  def load(self, filename, allow_mismatch=False):
     if not os.path.isfile(filename):
       return False
     logger = logging.getLogger()
@@ -347,10 +346,10 @@ class BaseModel(object):
       (batch_size, hidden_dim if not sep_h_dropout else num_non_lin*hidden_dim), drop_h)
 
     results, _ = theano.scan(step_fn,
-        sequences = [lin_x, x_mask],
-        outputs_info = [batch_h0, batch_c0],
-        non_sequences = [h_noise, U],
-        name = n('scan'))
+      sequences = [lin_x, x_mask],
+      outputs_info = [batch_h0, batch_c0],
+      non_sequences = [h_noise, U],
+      name = n('scan'))
 
     h = results[0]    # (timesteps, batch_size, hidden_dim)
     if backward:
